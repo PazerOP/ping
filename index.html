@@ -321,10 +321,12 @@
 				if (done) return;
 				done = true;
 				state.failures++;
+				state.samples.push(null); // Record loss as null
+				if (state.samples.length > state.maxSamples) state.samples.shift();
 				updateStats(null);
 				addLog(null, false);
 				drawGraph();
-			}, 5000);
+			}, 2000);
 
 			function handleResponse() {
 				if (done) return;
@@ -399,7 +401,9 @@
 
 			if (state.samples.length < 2) return;
 
-			const maxVal = Math.max(...state.samples, 100);
+			// Filter out nulls for maxVal calculation
+			const validSamples = state.samples.filter(s => s !== null);
+			const maxVal = validSamples.length > 0 ? Math.max(...validSamples, 100) : 100;
 			const padding = 10;
 			const graphW = w - padding * 2;
 			const graphH = h - padding * 2;
@@ -415,42 +419,91 @@
 				ctx.stroke();
 			}
 
-			// Fill under line
+			// Fill under line (skip nulls)
 			ctx.fillStyle = 'rgba(68, 255, 136, 0.1)';
-			ctx.beginPath();
-			ctx.moveTo(padding, h - padding);
-
+			let fillStarted = false;
+			let lastValidX = padding;
 			state.samples.forEach((sample, i) => {
 				const x = padding + (i / (state.maxSamples - 1)) * graphW;
-				const y = padding + graphH - (sample / maxVal) * graphH;
-				ctx.lineTo(x, y);
+				if (sample !== null) {
+					const y = padding + graphH - (sample / maxVal) * graphH;
+					if (!fillStarted) {
+						ctx.beginPath();
+						ctx.moveTo(x, h - padding);
+						fillStarted = true;
+					}
+					ctx.lineTo(x, y);
+					lastValidX = x;
+				} else if (fillStarted) {
+					ctx.lineTo(lastValidX, h - padding);
+					ctx.closePath();
+					ctx.fill();
+					fillStarted = false;
+				}
 			});
+			if (fillStarted) {
+				ctx.lineTo(lastValidX, h - padding);
+				ctx.closePath();
+				ctx.fill();
+			}
 
-			ctx.lineTo(padding + ((state.samples.length - 1) / (state.maxSamples - 1)) * graphW, h - padding);
-			ctx.closePath();
-			ctx.fill();
-
-			// Line
+			// Line (break at nulls to create gaps)
 			ctx.strokeStyle = '#4f8';
 			ctx.lineWidth = 2;
-			ctx.beginPath();
-
+			let lineStarted = false;
 			state.samples.forEach((sample, i) => {
 				const x = padding + (i / (state.maxSamples - 1)) * graphW;
-				const y = padding + graphH - (sample / maxVal) * graphH;
-				i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+				if (sample !== null) {
+					const y = padding + graphH - (sample / maxVal) * graphH;
+					if (!lineStarted) {
+						ctx.beginPath();
+						ctx.moveTo(x, y);
+						lineStarted = true;
+					} else {
+						ctx.lineTo(x, y);
+					}
+				} else if (lineStarted) {
+					ctx.stroke();
+					lineStarted = false;
+				}
 			});
-			ctx.stroke();
+			if (lineStarted) {
+				ctx.stroke();
+			}
+
+			// Draw red X marks for packet loss
+			ctx.strokeStyle = '#f44';
+			ctx.lineWidth = 2;
+			state.samples.forEach((sample, i) => {
+				if (sample === null) {
+					const x = padding + (i / (state.maxSamples - 1)) * graphW;
+					const y = h - padding - 10; // Near bottom
+					ctx.beginPath();
+					ctx.moveTo(x - 4, y - 4);
+					ctx.lineTo(x + 4, y + 4);
+					ctx.moveTo(x + 4, y - 4);
+					ctx.lineTo(x - 4, y + 4);
+					ctx.stroke();
+				}
+			});
 
 			// Current point
 			if (state.samples.length > 0) {
 				const last = state.samples[state.samples.length - 1];
 				const x = padding + ((state.samples.length - 1) / (state.maxSamples - 1)) * graphW;
-				const y = padding + graphH - (last / maxVal) * graphH;
-				ctx.fillStyle = '#4f8';
-				ctx.beginPath();
-				ctx.arc(x, y, 5, 0, Math.PI * 2);
-				ctx.fill();
+				if (last !== null) {
+					const y = padding + graphH - (last / maxVal) * graphH;
+					ctx.fillStyle = '#4f8';
+					ctx.beginPath();
+					ctx.arc(x, y, 5, 0, Math.PI * 2);
+					ctx.fill();
+				} else {
+					// Red dot for current loss
+					ctx.fillStyle = '#f44';
+					ctx.beginPath();
+					ctx.arc(x, h - padding - 10, 5, 0, Math.PI * 2);
+					ctx.fill();
+				}
 			}
 
 			// Scale labels
