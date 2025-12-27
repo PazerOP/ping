@@ -226,6 +226,23 @@
 			gap: 10px;
 			margin-bottom: 20px;
 		}
+
+		.header-links {
+			margin-left: auto;
+			display: flex;
+			gap: 15px;
+		}
+
+		.header-links a {
+			color: #888;
+			text-decoration: none;
+			font-size: 0.85rem;
+			transition: color 0.2s;
+		}
+
+		.header-links a:hover {
+			color: #8af;
+		}
 	</style>
 </head>
 
@@ -234,6 +251,10 @@
 		<div class="header">
 			<span class="status" id="status"></span>
 			<h1>Latency Monitor</h1>
+			<div class="header-links">
+				<a href="https://github.com/PazerOP/ping" target="_blank">GitHub</a>
+				<a href="https://claude.ai/code" target="_blank">Claude Code</a>
+			</div>
 		</div>
 		<div class="controls">
 			<label>Target:</label>
@@ -545,6 +566,24 @@
 			document.getElementById('log').innerHTML = '';
 			drawGraph();
 		}
+
+		// Tap-to-cycle for select elements (Tesla browser compatibility)
+		document.querySelectorAll('select').forEach(select => {
+			select.addEventListener('click', function(e) {
+				e.preventDefault();
+				const options = this.options;
+				const currentIndex = this.selectedIndex;
+				const nextIndex = (currentIndex + 1) % options.length;
+				this.selectedIndex = nextIndex;
+
+				// If interval changes while running, restart with new interval
+				if (this.id === 'interval' && state.running) {
+					clearInterval(state.intervalId);
+					const interval = parseInt(this.value);
+					state.intervalId = setInterval(ping, interval);
+				}
+			});
+		});
 	</script>
 </body>
 
