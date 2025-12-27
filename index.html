@@ -312,6 +312,7 @@
 			intervalId: null,
 			samples: [], // Now stores { value: number|null, time: number }
 			displayValues: [], // Animated Y values for smooth rendering
+			displayMaxVal: 100, // Animated max Y scale value
 			failures: 0,
 			total: 0,
 			maxSamples: 100,
@@ -340,6 +341,18 @@
 
 			// Animation speed - how fast Y values converge (higher = faster)
 			const animationSpeed = 0.15;
+			const scaleAnimationSpeed = 0.08; // Slower for scale changes
+
+			// Calculate target max value
+			const validValues = state.samples.map(s => s.value).filter(v => v !== null);
+			const targetMaxVal = validValues.length > 0 ? Math.max(...validValues, 100) : 100;
+
+			// Animate displayMaxVal toward target
+			if (Math.abs(targetMaxVal - state.displayMaxVal) > 0.5) {
+				state.displayMaxVal = lerp(state.displayMaxVal, targetMaxVal, scaleAnimationSpeed);
+			} else {
+				state.displayMaxVal = targetMaxVal;
+			}
 
 			// Build a map of sample time -> display value for Y animation
 			const displayMap = new Map();
@@ -532,9 +545,8 @@
 				return w - padding - normalizedAge * graphW;
 			}
 
-			// Filter out nulls for maxVal calculation
-			const validValues = state.samples.map(s => s.value).filter(v => v !== null);
-			const maxVal = validValues.length > 0 ? Math.max(...validValues, 100) : 100;
+			// Use animated max value for smooth scale transitions
+			const maxVal = state.displayMaxVal;
 
 			// Build points array with time-based X positions
 			let points = [];
@@ -627,7 +639,7 @@
 			ctx.fillStyle = '#666';
 			ctx.font = '10px monospace';
 			ctx.textAlign = 'right';
-			ctx.fillText(maxVal + 'ms', w - padding, padding + 10);
+			ctx.fillText(Math.round(maxVal) + 'ms', w - padding, padding + 10);
 			ctx.fillText('0ms', w - padding, h - padding);
 		}
 
@@ -718,6 +730,7 @@
 		function clearData() {
 			state.samples = [];
 			state.displayValues = [];
+			state.displayMaxVal = 100;
 			state.failures = 0;
 			state.total = 0;
 			['current', 'min', 'max', 'avg', 'jitter'].forEach(id =>
