@@ -566,6 +566,24 @@
 			document.getElementById('log').innerHTML = '';
 			drawGraph();
 		}
+
+		// Tap-to-cycle for select elements (Tesla browser compatibility)
+		document.querySelectorAll('select').forEach(select => {
+			select.addEventListener('click', function(e) {
+				e.preventDefault();
+				const options = this.options;
+				const currentIndex = this.selectedIndex;
+				const nextIndex = (currentIndex + 1) % options.length;
+				this.selectedIndex = nextIndex;
+
+				// If interval changes while running, restart with new interval
+				if (this.id === 'interval' && state.running) {
+					clearInterval(state.intervalId);
+					const interval = parseInt(this.value);
+					state.intervalId = setInterval(ping, interval);
+				}
+			});
+		});
 	</script>
 </body>
 
