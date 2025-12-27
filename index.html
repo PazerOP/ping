@@ -310,13 +310,14 @@
 		const state = {
 			running: false,
 			intervalId: null,
-			samples: [],
-			displaySamples: [], // Animated samples for smooth rendering
+			samples: [], // Now stores { value: number|null, time: number }
+			displayValues: [], // Animated Y values for smooth rendering
 			failures: 0,
 			total: 0,
 			maxSamples: 100,
 			animationId: null,
-			lastFrameTime: 0
+			lastFrameTime: 0,
+			startTime: null // Track when monitoring started
 		};
 
 		const canvas = document.getElementById('graph');
@@ -335,48 +336,42 @@
 		// Animation loop for smooth graph updates
 		function animate(currentTime) {
 			if (!state.lastFrameTime) state.lastFrameTime = currentTime;
-			const deltaTime = currentTime - state.lastFrameTime;
 			state.lastFrameTime = currentTime;
 
-			// Animation speed - how fast values converge (higher = faster)
+			// Animation speed - how fast Y values converge (higher = faster)
 			const animationSpeed = 0.15;
-			let needsRedraw = false;
 
-			// Sync displaySamples length with samples
-			while (state.displaySamples.length < state.samples.length) {
-				// New sample added - start from previous value or 0
-				const prevVal = state.displaySamples.length > 0
-					? state.displaySamples[state.displaySamples.length - 1]
-					: (state.samples[state.displaySamples.length] || 0);
-				state.displaySamples.push(prevVal);
-				needsRedraw = true;
-			}
-			while (state.displaySamples.length > state.samples.length) {
-				state.displaySamples.shift();
-				needsRedraw = true;
-			}
+			// Build a map of sample time -> display value for Y animation
+			const displayMap = new Map();
+			state.displayValues.forEach(dv => displayMap.set(dv.time, dv.value));
 
-			// Animate each sample toward its target
-			for (let i = 0; i < state.samples.length; i++) {
-				const target = state.samples[i];
-				const current = state.displaySamples[i];
+			// Update display values to match samples
+			const newDisplayValues = [];
+			for (const sample of state.samples) {
+				const existing = displayMap.get(sample.time);
+				let displayValue;
 
-				if (target === null) {
-					state.displaySamples[i] = null;
-				} else if (current === null) {
-					state.displaySamples[i] = target;
-					needsRedraw = true;
-				} else if (Math.abs(target - current) > 0.5) {
-					state.displaySamples[i] = lerp(current, target, animationSpeed);
-					needsRedraw = true;
+				if (sample.value === null) {
+					displayValue = null;
+				} else if (existing === undefined || existing === null) {
+					// New sample - start from previous display value or target
+					const prevDisplay = newDisplayValues.length > 0
+						? newDisplayValues[newDisplayValues.length - 1].value
+						: sample.value;
+					displayValue = prevDisplay !== null ? prevDisplay : sample.value;
+				} else if (Math.abs(sample.value - existing) > 0.5) {
+					// Animate toward target
+					displayValue = lerp(existing, sample.value, animationSpeed);
 				} else {
-					state.displaySamples[i] = target;
+					displayValue = sample.value;
 				}
-			}
 
-			if (needsRedraw) {
-				drawGraph();
+				newDisplayValues.push({ time: sample.time, value: displayValue });
 			}
+			state.displayValues = newDisplayValues;
+
+			// Always redraw since time is always moving (continuous scroll)
+			drawGraph();
 
 			state.animationId = requestAnimationFrame(animate);
 		}
@@ -398,6 +393,7 @@
 		function ping() {
 			const url = document.getElementById('target').value;
 			const start = performance.now();
+			const sampleTime = performance.now();
 			state.total++;
 
 			const img = new Image();
@@ -407,11 +403,10 @@
 				if (done) return;
 				done = true;
 				state.failures++;
-				state.samples.push(null); // Record loss as null
-				if (state.samples.length > state.maxSamples) state.samples.shift();
+				state.samples.push({ value: null, time: sampleTime }); // Record loss with timestamp
+				pruneOldSamples();
 				updateStats(null);
 				addLog(null, false);
-				drawGraph();
 			}, 2000);
 
 			function handleResponse() {
@@ -419,7 +414,7 @@
 				done = true;
 				clearTimeout(timeout);
 				const latency = Math.round(performance.now() - start);
-				recordSuccess(latency);
+				recordSuccess(latency, sampleTime);
 			}
 
 			img.onload = handleResponse;
@@ -428,12 +423,23 @@
 			img.src = url + '?_=' + Date.now() + Math.random();
 		}
 
-		function recordSuccess(latency) {
-			state.samples.push(latency);
-			if (state.samples.length > state.maxSamples) state.samples.shift();
+		function recordSuccess(latency, sampleTime) {
+			state.samples.push({ value: latency, time: sampleTime });
+			pruneOldSamples();
 			updateStats(latency);
 			addLog(latency, true);
-			drawGraph();
+		}
+
+		// Remove samples that are too old to be visible
+		function pruneOldSamples() {
+			const now = performance.now();
+			const interval = parseInt(document.getElementById('interval').value);
+			const windowDuration = (state.maxSamples - 1) * interval;
+
+			// Keep samples within the visible time window plus a small buffer
+			while (state.samples.length > 0 && (now - state.samples[0].time) > windowDuration + interval) {
+				state.samples.shift();
+			}
 		}
 
 		function updateStats(latency) {
@@ -441,17 +447,20 @@
 				document.getElementById('current').textContent = latency + 'ms';
 			}
 
-			if (state.samples.length > 0) {
-				const min = Math.min(...state.samples);
-				const max = Math.max(...state.samples);
-				const avg = Math.round(state.samples.reduce((a, b) => a + b, 0) / state.samples.length);
+			// Extract valid (non-null) values from samples
+			const validValues = state.samples.map(s => s.value).filter(v => v !== null);
+
+			if (validValues.length > 0) {
+				const min = Math.min(...validValues);
+				const max = Math.max(...validValues);
+				const avg = Math.round(validValues.reduce((a, b) => a + b, 0) / validValues.length);
 
 				document.getElementById('min').textContent = min + 'ms';
 				document.getElementById('max').textContent = max + 'ms';
 				document.getElementById('avg').textContent = avg + 'ms';
 
-				if (state.samples.length > 1) {
-					const variance = state.samples.reduce((sum, val) => sum + Math.pow(val - avg, 2), 0) / state.samples.length;
+				if (validValues.length > 1) {
+					const variance = validValues.reduce((sum, val) => sum + Math.pow(val - avg, 2), 0) / validValues.length;
 					document.getElementById('jitter').textContent = Math.round(Math.sqrt(variance)) + 'ms';
 				}
 			}
@@ -485,13 +494,6 @@
 			ctx.fillStyle = '#151520';
 			ctx.fillRect(0, 0, w, h);
 
-			// Use displaySamples for smooth animation
-			const samples = state.displaySamples;
-			if (samples.length < 2) return;
-
-			// Filter out nulls for maxVal calculation (use actual samples for consistent scale)
-			const validSamples = state.samples.filter(s => s !== null);
-			const maxVal = validSamples.length > 0 ? Math.max(...validSamples, 100) : 100;
 			const padding = 10;
 			const graphW = w - padding * 2;
 			const graphH = h - padding * 2;
@@ -507,76 +509,117 @@
 				ctx.stroke();
 			}
 
-			// Fill under line (skip nulls) - with smooth curves
-			ctx.fillStyle = 'rgba(68, 255, 136, 0.1)';
-			let fillStarted = false;
-			let lastValidX = padding;
-			let points = [];
-			samples.forEach((sample, i) => {
-				const x = padding + (i / (state.maxSamples - 1)) * graphW;
-				if (sample !== null) {
-					const y = padding + graphH - (sample / maxVal) * graphH;
-					points.push({ x, y });
-				} else if (points.length > 0) {
-					// Draw fill for this segment
-					drawSmoothFill(points, h, padding);
-					points = [];
-				}
-			});
-			if (points.length > 0) {
-				drawSmoothFill(points, h, padding);
+			if (state.displayValues.length < 2) {
+				// Scale labels even when empty
+				ctx.fillStyle = '#666';
+				ctx.font = '10px monospace';
+				ctx.textAlign = 'right';
+				ctx.fillText('100ms', w - padding, padding + 10);
+				ctx.fillText('0ms', w - padding, h - padding);
+				return;
 			}
 
-			// Line (break at nulls to create gaps) - with smooth curves
-			ctx.strokeStyle = '#4f8';
-			ctx.lineWidth = 2;
-			points = [];
-			samples.forEach((sample, i) => {
-				const x = padding + (i / (state.maxSamples - 1)) * graphW;
-				if (sample !== null) {
-					const y = padding + graphH - (sample / maxVal) * graphH;
-					points.push({ x, y });
-				} else if (points.length > 0) {
-					drawSmoothLine(points);
-					points = [];
+			// Calculate time window for X positioning
+			const now = performance.now();
+			const interval = parseInt(document.getElementById('interval').value);
+			const windowDuration = (state.maxSamples - 1) * interval;
+
+			// Function to get X position from timestamp (continuous time-based)
+			function getX(time) {
+				const age = now - time;
+				// Newest at right edge, oldest at left edge
+				const normalizedAge = age / windowDuration;
+				return w - padding - normalizedAge * graphW;
+			}
+
+			// Filter out nulls for maxVal calculation
+			const validValues = state.samples.map(s => s.value).filter(v => v !== null);
+			const maxVal = validValues.length > 0 ? Math.max(...validValues, 100) : 100;
+
+			// Build points array with time-based X positions
+			let points = [];
+			state.displayValues.forEach((sample, i) => {
+				const x = getX(sample.time);
+				// Only include points within visible area (with small buffer)
+				if (x >= padding - 20 && x <= w - padding + 20) {
+					if (sample.value !== null) {
+						const y = padding + graphH - (sample.value / maxVal) * graphH;
+						points.push({ x, y, isNull: false });
+					} else {
+						points.push({ x, y: h - padding - 10, isNull: true });
+					}
 				}
 			});
-			if (points.length > 0) {
-				drawSmoothLine(points);
+
+			// Separate into segments (break at nulls)
+			let segments = [];
+			let currentSegment = [];
+			points.forEach(pt => {
+				if (!pt.isNull) {
+					currentSegment.push(pt);
+				} else {
+					if (currentSegment.length > 0) {
+						segments.push(currentSegment);
+						currentSegment = [];
+					}
+				}
+			});
+			if (currentSegment.length > 0) {
+				segments.push(currentSegment);
 			}
+
+			// Fill under line for each segment
+			ctx.fillStyle = 'rgba(68, 255, 136, 0.1)';
+			segments.forEach(seg => {
+				if (seg.length >= 2) {
+					drawSmoothFill(seg, h, padding);
+				}
+			});
+
+			// Line for each segment
+			ctx.strokeStyle = '#4f8';
+			ctx.lineWidth = 2;
+			segments.forEach(seg => {
+				if (seg.length >= 2) {
+					drawSmoothLine(seg);
+				}
+			});
 
 			// Draw red X marks for packet loss
 			ctx.strokeStyle = '#f44';
 			ctx.lineWidth = 2;
-			state.samples.forEach((sample, i) => {
-				if (sample === null) {
-					const x = padding + (i / (state.maxSamples - 1)) * graphW;
-					const y = h - padding - 10; // Near bottom
-					ctx.beginPath();
-					ctx.moveTo(x - 4, y - 4);
-					ctx.lineTo(x + 4, y + 4);
-					ctx.moveTo(x + 4, y - 4);
-					ctx.lineTo(x - 4, y + 4);
-					ctx.stroke();
+			state.samples.forEach(sample => {
+				if (sample.value === null) {
+					const x = getX(sample.time);
+					if (x >= padding && x <= w - padding) {
+						const y = h - padding - 10;
+						ctx.beginPath();
+						ctx.moveTo(x - 4, y - 4);
+						ctx.lineTo(x + 4, y + 4);
+						ctx.moveTo(x + 4, y - 4);
+						ctx.lineTo(x - 4, y + 4);
+						ctx.stroke();
+					}
 				}
 			});
 
-			// Current point
-			if (samples.length > 0) {
-				const last = samples[samples.length - 1];
-				const x = padding + ((samples.length - 1) / (state.maxSamples - 1)) * graphW;
-				if (last !== null) {
-					const y = padding + graphH - (last / maxVal) * graphH;
-					ctx.fillStyle = '#4f8';
-					ctx.beginPath();
-					ctx.arc(x, y, 5, 0, Math.PI * 2);
-					ctx.fill();
-				} else {
-					// Red dot for current loss
-					ctx.fillStyle = '#f44';
-					ctx.beginPath();
-					ctx.arc(x, h - padding - 10, 5, 0, Math.PI * 2);
-					ctx.fill();
+			// Current point (most recent sample)
+			if (state.displayValues.length > 0) {
+				const last = state.displayValues[state.displayValues.length - 1];
+				const x = getX(last.time);
+				if (x >= padding && x <= w - padding) {
+					if (last.value !== null) {
+						const y = padding + graphH - (last.value / maxVal) * graphH;
+						ctx.fillStyle = '#4f8';
+						ctx.beginPath();
+						ctx.arc(x, y, 5, 0, Math.PI * 2);
+						ctx.fill();
+					} else {
+						ctx.fillStyle = '#f44';
+						ctx.beginPath();
+						ctx.arc(x, h - padding - 10, 5, 0, Math.PI * 2);
+						ctx.fill();
+					}
 				}
 			}
 
@@ -674,7 +717,7 @@
 
 		function clearData() {
 			state.samples = [];
-			state.displaySamples = [];
+			state.displayValues = [];
 			state.failures = 0;
 			state.total = 0;
 			['current', 'min', 'max', 'avg', 'jitter'].forEach(id =>
