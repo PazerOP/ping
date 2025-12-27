@@ -311,8 +311,11 @@
 			running: false,
 			intervalId: null,
 			samples: [], // Now stores { value: number|null, time: number }
-			displayValues: [], // Animated Y values for smooth rendering
+			displayValues: [], // Animated Y values for smooth rendering: { time, value, startValue, startTime }
 			displayMaxVal: 100, // Animated max Y scale value
+			targetMaxVal: 100, // Target max Y scale value
+			maxValStartValue: 100, // Starting value for max animation
+			maxValStartTime: 0, // When max animation started
 			failures: 0,
 			total: 0,
 			maxSamples: 100,
@@ -339,47 +342,60 @@
 			if (!state.lastFrameTime) state.lastFrameTime = currentTime;
 			state.lastFrameTime = currentTime;
 
-			// Animation speed - how fast Y values converge (higher = faster)
-			const animationSpeed = 0.15;
-			const scaleAnimationSpeed = 0.08; // Slower for scale changes
+			// Get the update interval - animations should take this long to complete
+			const interval = parseInt(document.getElementById('interval').value);
 
 			// Calculate target max value
 			const validValues = state.samples.map(s => s.value).filter(v => v !== null);
-			const targetMaxVal = validValues.length > 0 ? Math.max(...validValues, 100) : 100;
+			const newTargetMaxVal = validValues.length > 0 ? Math.max(...validValues, 100) : 100;
 
-			// Animate displayMaxVal toward target
-			if (Math.abs(targetMaxVal - state.displayMaxVal) > 0.5) {
-				state.displayMaxVal = lerp(state.displayMaxVal, targetMaxVal, scaleAnimationSpeed);
-			} else {
-				state.displayMaxVal = targetMaxVal;
+			// If target changed, start a new max value animation
+			if (newTargetMaxVal !== state.targetMaxVal) {
+				state.maxValStartValue = state.displayMaxVal;
+				state.maxValStartTime = currentTime;
+				state.targetMaxVal = newTargetMaxVal;
 			}
 
-			// Build a map of sample time -> display value for Y animation
+			// Animate displayMaxVal toward target over the interval duration
+			const maxValElapsed = currentTime - state.maxValStartTime;
+			const maxValProgress = Math.min(1, maxValElapsed / interval);
+			const maxValEased = easeOutCubic(maxValProgress);
+			state.displayMaxVal = lerp(state.maxValStartValue, state.targetMaxVal, maxValEased);
+
+			// Build a map of sample time -> display entry for Y animation
 			const displayMap = new Map();
-			state.displayValues.forEach(dv => displayMap.set(dv.time, dv.value));
+			state.displayValues.forEach(dv => displayMap.set(dv.time, dv));
 
 			// Update display values to match samples
 			const newDisplayValues = [];
 			for (const sample of state.samples) {
 				const existing = displayMap.get(sample.time);
-				let displayValue;
+				let displayEntry;
 
 				if (sample.value === null) {
-					displayValue = null;
-				} else if (existing === undefined || existing === null) {
-					// New sample - start from previous display value or target
+					displayEntry = { time: sample.time, value: null, startValue: null, startTime: currentTime };
+				} else if (!existing || existing.value === null) {
+					// New sample - start animation from previous display value or the target itself
 					const prevDisplay = newDisplayValues.length > 0
 						? newDisplayValues[newDisplayValues.length - 1].value
 						: sample.value;
-					displayValue = prevDisplay !== null ? prevDisplay : sample.value;
-				} else if (Math.abs(sample.value - existing) > 0.5) {
-					// Animate toward target
-					displayValue = lerp(existing, sample.value, animationSpeed);
+					const startVal = prevDisplay !== null ? prevDisplay : sample.value;
+					displayEntry = { time: sample.time, value: startVal, startValue: startVal, startTime: currentTime };
 				} else {
-					displayValue = sample.value;
+					// Existing sample - animate over the interval duration
+					const elapsed = currentTime - existing.startTime;
+					const progress = Math.min(1, elapsed / interval);
+					const eased = easeOutCubic(progress);
+					const animatedValue = lerp(existing.startValue, sample.value, eased);
+					displayEntry = {
+						time: sample.time,
+						value: animatedValue,
+						startValue: existing.startValue,
+						startTime: existing.startTime
+					};
 				}
 
-				newDisplayValues.push({ time: sample.time, value: displayValue });
+				newDisplayValues.push(displayEntry);
 			}
 			state.displayValues = newDisplayValues;
 
@@ -731,6 +747,9 @@
 			state.samples = [];
 			state.displayValues = [];
 			state.displayMaxVal = 100;
+			state.targetMaxVal = 100;
+			state.maxValStartValue = 100;
+			state.maxValStartTime = 0;
 			state.failures = 0;
 			state.total = 0;
 			['current', 'min', 'max', 'avg', 'jitter'].forEach(id =>
