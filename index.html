@@ -311,13 +311,78 @@
 			running: false,
 			intervalId: null,
 			samples: [],
+			displaySamples: [], // Animated samples for smooth rendering
 			failures: 0,
 			total: 0,
-			maxSamples: 100
+			maxSamples: 100,
+			animationId: null,
+			lastFrameTime: 0
 		};
 
 		const canvas = document.getElementById('graph');
 		const ctx = canvas.getContext('2d');
+
+		// Easing function for smooth animation
+		function easeOutCubic(t) {
+			return 1 - Math.pow(1 - t, 3);
+		}
+
+		// Linear interpolation
+		function lerp(start, end, t) {
+			return start + (end - start) * t;
+		}
+
+		// Animation loop for smooth graph updates
+		function animate(currentTime) {
+			if (!state.lastFrameTime) state.lastFrameTime = currentTime;
+			const deltaTime = currentTime - state.lastFrameTime;
+			state.lastFrameTime = currentTime;
+
+			// Animation speed - how fast values converge (higher = faster)
+			const animationSpeed = 0.15;
+			let needsRedraw = false;
+
+			// Sync displaySamples length with samples
+			while (state.displaySamples.length < state.samples.length) {
+				// New sample added - start from previous value or 0
+				const prevVal = state.displaySamples.length > 0
+					? state.displaySamples[state.displaySamples.length - 1]
+					: (state.samples[state.displaySamples.length] || 0);
+				state.displaySamples.push(prevVal);
+				needsRedraw = true;
+			}
+			while (state.displaySamples.length > state.samples.length) {
+				state.displaySamples.shift();
+				needsRedraw = true;
+			}
+
+			// Animate each sample toward its target
+			for (let i = 0; i < state.samples.length; i++) {
+				const target = state.samples[i];
+				const current = state.displaySamples[i];
+
+				if (target === null) {
+					state.displaySamples[i] = null;
+				} else if (current === null) {
+					state.displaySamples[i] = target;
+					needsRedraw = true;
+				} else if (Math.abs(target - current) > 0.5) {
+					state.displaySamples[i] = lerp(current, target, animationSpeed);
+					needsRedraw = true;
+				} else {
+					state.displaySamples[i] = target;
+				}
+			}
+
+			if (needsRedraw) {
+				drawGraph();
+			}
+
+			state.animationId = requestAnimationFrame(animate);
+		}
+
+		// Start animation loop
+		state.animationId = requestAnimationFrame(animate);
 
 		function resizeCanvas() {
 			const rect = canvas.getBoundingClientRect();
@@ -420,9 +485,11 @@
 			ctx.fillStyle = '#151520';
 			ctx.fillRect(0, 0, w, h);
 
-			if (state.samples.length < 2) return;
+			// Use displaySamples for smooth animation
+			const samples = state.displaySamples;
+			if (samples.length < 2) return;
 
-			// Filter out nulls for maxVal calculation
+			// Filter out nulls for maxVal calculation (use actual samples for consistent scale)
 			const validSamples = state.samples.filter(s => s !== null);
 			const maxVal = validSamples.length > 0 ? Math.max(...validSamples, 100) : 100;
 			const padding = 10;
@@ -440,56 +507,42 @@
 				ctx.stroke();
 			}
 
-			// Fill under line (skip nulls)
+			// Fill under line (skip nulls) - with smooth curves
 			ctx.fillStyle = 'rgba(68, 255, 136, 0.1)';
 			let fillStarted = false;
 			let lastValidX = padding;
-			state.samples.forEach((sample, i) => {
+			let points = [];
+			samples.forEach((sample, i) => {
 				const x = padding + (i / (state.maxSamples - 1)) * graphW;
 				if (sample !== null) {
 					const y = padding + graphH - (sample / maxVal) * graphH;
-					if (!fillStarted) {
-						ctx.beginPath();
-						ctx.moveTo(x, h - padding);
-						fillStarted = true;
-					}
-					ctx.lineTo(x, y);
-					lastValidX = x;
-				} else if (fillStarted) {
-					ctx.lineTo(lastValidX, h - padding);
-					ctx.closePath();
-					ctx.fill();
-					fillStarted = false;
+					points.push({ x, y });
+				} else if (points.length > 0) {
+					// Draw fill for this segment
+					drawSmoothFill(points, h, padding);
+					points = [];
 				}
 			});
-			if (fillStarted) {
-				ctx.lineTo(lastValidX, h - padding);
-				ctx.closePath();
-				ctx.fill();
+			if (points.length > 0) {
+				drawSmoothFill(points, h, padding);
 			}
 
-			// Line (break at nulls to create gaps)
+			// Line (break at nulls to create gaps) - with smooth curves
 			ctx.strokeStyle = '#4f8';
 			ctx.lineWidth = 2;
-			let lineStarted = false;
-			state.samples.forEach((sample, i) => {
+			points = [];
+			samples.forEach((sample, i) => {
 				const x = padding + (i / (state.maxSamples - 1)) * graphW;
 				if (sample !== null) {
 					const y = padding + graphH - (sample / maxVal) * graphH;
-					if (!lineStarted) {
-						ctx.beginPath();
-						ctx.moveTo(x, y);
-						lineStarted = true;
-					} else {
-						ctx.lineTo(x, y);
-					}
-				} else if (lineStarted) {
-					ctx.stroke();
-					lineStarted = false;
+					points.push({ x, y });
+				} else if (points.length > 0) {
+					drawSmoothLine(points);
+					points = [];
 				}
 			});
-			if (lineStarted) {
-				ctx.stroke();
+			if (points.length > 0) {
+				drawSmoothLine(points);
 			}
 
 			// Draw red X marks for packet loss
@@ -509,9 +562,9 @@
 			});
 
 			// Current point
-			if (state.samples.length > 0) {
-				const last = state.samples[state.samples.length - 1];
-				const x = padding + ((state.samples.length - 1) / (state.maxSamples - 1)) * graphW;
+			if (samples.length > 0) {
+				const last = samples[samples.length - 1];
+				const x = padding + ((samples.length - 1) / (state.maxSamples - 1)) * graphW;
 				if (last !== null) {
 					const y = padding + graphH - (last / maxVal) * graphH;
 					ctx.fillStyle = '#4f8';
@@ -533,6 +586,69 @@
 			ctx.textAlign = 'right';
 			ctx.fillText(maxVal + 'ms', w - padding, padding + 10);
 			ctx.fillText('0ms', w - padding, h - padding);
+		}
+
+		// Draw smooth curved line through points
+		function drawSmoothLine(points) {
+			if (points.length < 2) return;
+
+			ctx.beginPath();
+			ctx.moveTo(points[0].x, points[0].y);
+
+			if (points.length === 2) {
+				ctx.lineTo(points[1].x, points[1].y);
+			} else {
+				// Use cardinal spline for smooth curves
+				for (let i = 0; i < points.length - 1; i++) {
+					const p0 = points[Math.max(0, i - 1)];
+					const p1 = points[i];
+					const p2 = points[i + 1];
+					const p3 = points[Math.min(points.length - 1, i + 2)];
+
+					// Control points for smooth curve
+					const tension = 0.3;
+					const cp1x = p1.x + (p2.x - p0.x) * tension;
+					const cp1y = p1.y + (p2.y - p0.y) * tension;
+					const cp2x = p2.x - (p3.x - p1.x) * tension;
+					const cp2y = p2.y - (p3.y - p1.y) * tension;
+
+					ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+				}
+			}
+			ctx.stroke();
+		}
+
+		// Draw smooth filled area under curve
+		function drawSmoothFill(points, h, padding) {
+			if (points.length < 2) return;
+
+			ctx.beginPath();
+			ctx.moveTo(points[0].x, h - padding);
+			ctx.lineTo(points[0].x, points[0].y);
+
+			if (points.length === 2) {
+				ctx.lineTo(points[1].x, points[1].y);
+			} else {
+				// Use cardinal spline for smooth curves
+				for (let i = 0; i < points.length - 1; i++) {
+					const p0 = points[Math.max(0, i - 1)];
+					const p1 = points[i];
+					const p2 = points[i + 1];
+					const p3 = points[Math.min(points.length - 1, i + 2)];
+
+					const tension = 0.3;
+					const cp1x = p1.x + (p2.x - p0.x) * tension;
+					const cp1y = p1.y + (p2.y - p0.y) * tension;
+					const cp2x = p2.x - (p3.x - p1.x) * tension;
+					const cp2y = p2.y - (p3.y - p1.y) * tension;
+
+					ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+				}
+			}
+
+			ctx.lineTo(points[points.length - 1].x, h - padding);
+			ctx.closePath();
+			ctx.fill();
 		}
 
 		function toggle() {
@@ -558,6 +674,7 @@
 
 		function clearData() {
 			state.samples = [];
+			state.displaySamples = [];
 			state.failures = 0;
 			state.total = 0;
 			['current', 'min', 'max', 'avg', 'jitter'].forEach(id =>
