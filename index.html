@@ -327,11 +327,6 @@
 		const canvas = document.getElementById('graph');
 		const ctx = canvas.getContext('2d');
 
-		// Easing function for smooth animation
-		function easeOutCubic(t) {
-			return 1 - Math.pow(1 - t, 3);
-		}
-
 		// Linear interpolation
 		function lerp(start, end, t) {
 			return start + (end - start) * t;
@@ -359,8 +354,7 @@
 			// Animate displayMaxVal toward target over the interval duration
 			const maxValElapsed = currentTime - state.maxValStartTime;
 			const maxValProgress = Math.min(1, maxValElapsed / interval);
-			const maxValEased = easeOutCubic(maxValProgress);
-			state.displayMaxVal = lerp(state.maxValStartValue, state.targetMaxVal, maxValEased);
+			state.displayMaxVal = lerp(state.maxValStartValue, state.targetMaxVal, maxValProgress);
 
 			// Build a map of sample time -> display entry for Y animation
 			const displayMap = new Map();
@@ -385,8 +379,7 @@
 					// Existing sample - animate over the interval duration
 					const elapsed = currentTime - existing.startTime;
 					const progress = Math.min(1, elapsed / interval);
-					const eased = easeOutCubic(progress);
-					const animatedValue = lerp(existing.startValue, sample.value, eased);
+					const animatedValue = lerp(existing.startValue, sample.value, progress);
 					displayEntry = {
 						time: sample.time,
 						value: animatedValue,
