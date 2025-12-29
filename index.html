@@ -310,7 +310,7 @@
 		const state = {
 			running: false,
 			intervalId: null,
-			samples: [], // Now stores { value: number|null, time: number }
+			samples: [], // Now stores { value: number|null, time: number, slot: number }
 			displayValues: [], // Animated Y values for smooth rendering
 			displayMaxVal: 100, // Animated max Y scale value
 			failures: 0,
@@ -318,7 +318,8 @@
 			maxSamples: 100,
 			animationId: null,
 			lastFrameTime: 0,
-			startTime: null // Track when monitoring started
+			startTime: null, // Track when monitoring started
+			pingCount: 0 // Track number of pings sent for slot assignment
 		};
 
 		const canvas = document.getElementById('graph');
@@ -354,14 +355,14 @@
 				state.displayMaxVal = targetMaxVal;
 			}
 
-			// Build a map of sample time -> display value for Y animation
+			// Build a map of sample slot -> display value for Y animation
 			const displayMap = new Map();
-			state.displayValues.forEach(dv => displayMap.set(dv.time, dv.value));
+			state.displayValues.forEach(dv => displayMap.set(dv.slot, dv.value));
 
 			// Update display values to match samples
 			const newDisplayValues = [];
 			for (const sample of state.samples) {
-				const existing = displayMap.get(sample.time);
+				const existing = displayMap.get(sample.slot);
 				let displayValue;
 
 				if (sample.value === null) {
@@ -379,7 +380,7 @@
 					displayValue = sample.value;
 				}
 
-				newDisplayValues.push({ time: sample.time, value: displayValue });
+				newDisplayValues.push({ slot: sample.slot, value: displayValue });
 			}
 			state.displayValues = newDisplayValues;
 
@@ -406,7 +407,15 @@
 		function ping() {
 			const url = document.getElementById('target').value;
 			const start = performance.now();
-			const sampleTime = performance.now();
+
+			// Initialize start time on first ping
+			if (state.startTime === null) {
+				state.startTime = performance.now();
+			}
+
+			// Assign this ping a slot number (fixed position on timeline)
+			const slot = state.pingCount;
+			state.pingCount++;
 			state.total++;
 
 			const img = new Image();
@@ -416,7 +425,7 @@
 				if (done) return;
 				done = true;
 				state.failures++;
-				state.samples.push({ value: null, time: sampleTime }); // Record loss with timestamp
+				state.samples.push({ value: null, slot: slot }); // Record loss with slot
 				pruneOldSamples();
 				updateStats(null);
 				addLog(null, false);
@@ -427,7 +436,7 @@
 				done = true;
 				clearTimeout(timeout);
 				const latency = Math.round(performance.now() - start);
-				recordSuccess(latency, sampleTime);
+				recordSuccess(latency, slot);
 			}
 
 			img.onload = handleResponse;
@@ -436,8 +445,8 @@
 			img.src = url + '?_=' + Date.now() + Math.random();
 		}
 
-		function recordSuccess(latency, sampleTime) {
-			state.samples.push({ value: latency, time: sampleTime });
+		function recordSuccess(latency, slot) {
+			state.samples.push({ value: latency, slot: slot });
 			pruneOldSamples();
 			updateStats(latency);
 			addLog(latency, true);
@@ -445,12 +454,9 @@
 
 		// Remove samples that are too old to be visible
 		function pruneOldSamples() {
-			const now = performance.now();
 			const interval = parseInt(document.getElementById('interval').value);
-			const windowDuration = (state.maxSamples - 1) * interval;
-
-			// Keep samples within the visible time window plus a small buffer
-			while (state.samples.length > 0 && (now - state.samples[0].time) > windowDuration + interval) {
+			// Keep only the most recent maxSamples + buffer for smooth scrolling
+			while (state.samples.length > state.maxSamples + 5) {
 				state.samples.shift();
 			}
 		}
@@ -532,15 +538,24 @@
 				return;
 			}
 
-			// Calculate time window for X positioning
+			// Fixed interval positioning - slots are evenly spaced regardless of actual arrival time
 			const now = performance.now();
 			const interval = parseInt(document.getElementById('interval').value);
 			const windowDuration = (state.maxSamples - 1) * interval;
 
-			// Function to get X position from timestamp (continuous time-based)
-			function getX(time) {
-				const age = now - time;
-				// Newest at right edge, oldest at left edge
+			// Calculate virtual time position based on elapsed time since start
+			// Add offset so new data comes in off-screen to the right
+			const rightEdgeOffset = interval * 2; // 2 intervals of buffer off-screen
+			const elapsedTime = state.startTime !== null ? now - state.startTime : 0;
+
+			// Function to get X position from slot number (fixed intervals)
+			function getX(slot) {
+				// Each slot is at a fixed time position: startTime + slot * interval
+				const slotTime = slot * interval;
+				// How far back from the current "view edge" is this slot?
+				// The view edge is at elapsedTime - rightEdgeOffset
+				const viewEdgeTime = elapsedTime - rightEdgeOffset;
+				const age = viewEdgeTime - slotTime;
 				const normalizedAge = age / windowDuration;
 				return w - padding - normalizedAge * graphW;
 			}
@@ -548,17 +563,17 @@
 			// Use animated max value for smooth scale transitions
 			const maxVal = state.displayMaxVal;
 
-			// Build points array with time-based X positions
+			// Build points array with slot-based X positions (fixed intervals)
 			let points = [];
 			state.displayValues.forEach((sample, i) => {
-				const x = getX(sample.time);
-				// Only include points within visible area (with small buffer)
-				if (x >= padding - 20 && x <= w - padding + 20) {
+				const x = getX(sample.slot);
+				// Only include points within visible area (with small buffer for bezier curves)
+				if (x >= padding - 50 && x <= w - padding + 50) {
 					if (sample.value !== null) {
 						const y = padding + graphH - (sample.value / maxVal) * graphH;
-						points.push({ x, y, isNull: false });
+						points.push({ x, y, isNull: false, slot: sample.slot });
 					} else {
-						points.push({ x, y: h - padding - 10, isNull: true });
+						points.push({ x, y: h - padding - 10, isNull: true, slot: sample.slot });
 					}
 				}
 			});
@@ -579,6 +594,12 @@
 			if (currentSegment.length > 0) {
 				segments.push(currentSegment);
 			}
+
+			// Clip to graph area for clean edges
+			ctx.save();
+			ctx.beginPath();
+			ctx.rect(padding, padding, graphW, graphH);
+			ctx.clip();
 
 			// Fill under line for each segment
 			ctx.fillStyle = 'rgba(68, 255, 136, 0.1)';
@@ -602,7 +623,7 @@
 			ctx.lineWidth = 2;
 			state.samples.forEach(sample => {
 				if (sample.value === null) {
-					const x = getX(sample.time);
+					const x = getX(sample.slot);
 					if (x >= padding && x <= w - padding) {
 						const y = h - padding - 10;
 						ctx.beginPath();
@@ -615,25 +636,17 @@
 				}
 			});
 
-			// Current point (most recent sample)
-			if (state.displayValues.length > 0) {
-				const last = state.displayValues[state.displayValues.length - 1];
-				const x = getX(last.time);
-				if (x >= padding && x <= w - padding) {
-					if (last.value !== null) {
-						const y = padding + graphH - (last.value / maxVal) * graphH;
-						ctx.fillStyle = '#4f8';
-						ctx.beginPath();
-						ctx.arc(x, y, 5, 0, Math.PI * 2);
-						ctx.fill();
-					} else {
-						ctx.fillStyle = '#f44';
-						ctx.beginPath();
-						ctx.arc(x, h - padding - 10, 5, 0, Math.PI * 2);
-						ctx.fill();
-					}
-				}
+			// Current point indicator (most recent visible sample)
+			const visiblePoints = points.filter(p => !p.isNull && p.x >= padding && p.x <= w - padding);
+			if (visiblePoints.length > 0) {
+				const last = visiblePoints[visiblePoints.length - 1];
+				ctx.fillStyle = '#4f8';
+				ctx.beginPath();
+				ctx.arc(last.x, last.y, 5, 0, Math.PI * 2);
+				ctx.fill();
 			}
+
+			ctx.restore();
 
 			// Scale labels
 			ctx.fillStyle = '#666';
@@ -733,6 +746,8 @@
 			state.displayMaxVal = 100;
 			state.failures = 0;
 			state.total = 0;
+			state.startTime = null;
+			state.pingCount = 0;
 			['current', 'min', 'max', 'avg', 'jitter'].forEach(id =>
 				document.getElementById(id).textContent = '--');
 			document.getElementById('loss').textContent = '0%';
